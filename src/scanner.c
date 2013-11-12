@@ -1,3 +1,16 @@
+/*
+ Todo:
+ 
+ - finish routines to deal with duplicates
+ -- delete
+ -- link
+ -- how to deal with copies not on this computer?
+ 
+ - add options to change deal with duplicate by command line
+ - add "dry run" command
+ - add "exclude" command, with defaults
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -35,18 +48,24 @@ char *create_track_stmt = "CREATE TABLE IF NOT EXISTS track("
 						  "num_files 	INTEGER"
 						  ");"
 						  "DELETE from track;"
-						  "INSERT INTO track(size,numfiles) select size,count(*) from FILES GROUP BY size;";
+						  "INSERT INTO track(size,num_files) select size,count(*) from FILES GROUP BY size;";
 
 char *select_track_stmt = "SELECT size,num_files FROM track WHERE num_files>1";
 
 char *select_hosts_stmt = "SELECT COUNT(DISTINCT computer) FROM track JOIN files ON track.size=files.size WHERE hash IS NULL AND num_files>1 AND computer!=?";
 sqlite3_stmt *select_hosts_prep;
 
-char *select_file_hash_stmt = "SELECT filename FROM files WHERE size=? AND hash IS NULL";
+char *select_file_hash_stmt = "SELECT rowid,filename FROM files WHERE size=? AND hash IS NULL";
 sqlite3_stmt *select_file_hash_prep;		
 
-char *select_file_dups_stmt = "SELECT computer,filename,size,hash FROM files WHERE size=? AND hash IS NOT NULL ORDER BY size,hash";
+char *select_file_dups_count_stmt = "SELECT COUNT(*) FROM files WHERE size=? AND hash IS NOT NULL ORDER BY hash";
+sqlite3_stmt *select_file_dups_count_prep;
+
+char *select_file_dups_stmt = "SELECT computer,filename,hash FROM files WHERE size=? AND hash IS NOT NULL ORDER BY hash";
 sqlite3_stmt *select_file_dups_prep;
+
+char *update_file_hash_stmt = "UPDATE files set hash=? WHERE rowid=?";
+sqlite3_stmt *update_file_hash_prep;
 
 char *insert_size_stmt = "INSERT INTO files(computer,filename,size) values(?,?,?)";
 sqlite3_stmt *insert_size_prep;
@@ -86,11 +105,11 @@ unsigned int fast_hash_file(const char *filename, int size) {
 	
 	if(fp) {
 		xxhash_state = XXH32_init(size);
-		size_read = fread(buffer,1,buffer_size,fp);
+		size_read = (int)fread(buffer,1,buffer_size,fp);
 	
 		while(size_read) {
 			XXH32_update(xxhash_state,buffer,size_read);
-			size_read = fread(buffer,1,buffer_size,fp);
+			size_read = (int)fread(buffer,1,buffer_size,fp);
 		}
 		
 		hash = XXH32_digest(xxhash_state);
@@ -109,12 +128,12 @@ int file_callback(const char *filename, const struct stat *stat_struct, int flag
 	char *fullfilename = realpath(filename,0);
 
 	if(stat_struct->st_size < min_size) {
-		if(verbose)
-			printf("%s: (skipping, under min_size)\n",fullfilename);
+//		if(verbose)
+//			printf("%s: (skipping, under min_size)\n",fullfilename);
 		return 0;
 	}
 	
-	sqlite3_bind_text(select_prep,1,fullfilename,strlen(fullfilename),SQLITE_TRANSIENT);
+	sqlite3_bind_text(select_prep,1,fullfilename,(int)strlen(fullfilename),SQLITE_TRANSIENT);
 	if(sqlite3_step(select_prep)==SQLITE_DONE) {
 		if(verbose) {
 			printf("%s: ...",fullfilename);
@@ -122,7 +141,7 @@ int file_callback(const char *filename, const struct stat *stat_struct, int flag
 		}
 		// Only hash every file if we're looking for exact duplicates
 		if(hash_flag) {
-			hash = fast_hash_file(filename,stat_struct->st_size);
+			hash = fast_hash_file(filename,(int)stat_struct->st_size);
 			if(verbose)
 				printf("\b\b\b%x\n",hash);
 			insert_prep_proxy = insert_full_prep;
@@ -132,9 +151,9 @@ int file_callback(const char *filename, const struct stat *stat_struct, int flag
 			insert_prep_proxy = insert_size_prep;
 			printf("\n");
 		}
-		sqlite3_bind_text(insert_prep_proxy,1,hostname,strlen(hostname),SQLITE_STATIC);
-		sqlite3_bind_text(insert_prep_proxy,2,fullfilename,strlen(fullfilename),SQLITE_TRANSIENT);
-		sqlite3_bind_int(insert_prep_proxy,3,stat_struct->st_size);
+		sqlite3_bind_text(insert_prep_proxy,1,hostname,(int)strlen(hostname),SQLITE_STATIC);
+		sqlite3_bind_text(insert_prep_proxy,2,fullfilename,(int)strlen(fullfilename),SQLITE_TRANSIENT);
+		sqlite3_bind_int(insert_prep_proxy,3,(int)stat_struct->st_size);
 		sqlite3_step(insert_prep_proxy);
 		sqlite3_reset(insert_prep_proxy);
 	}
@@ -146,37 +165,110 @@ int file_callback(const char *filename, const struct stat *stat_struct, int flag
 	return 0;
 }
 
-void dup_checker(void *nothing, int num_dups, char **column_vals, char **column_names) {
-	// column[0] == size
+void print_dups(char *computer, char **filenames, int num_files, int size) {
+	int i;
 	
-	int res;
-	char **unique_hashes = malloc(sizeof(char *) * num_dups);
-	char **
+	printf("[");
+	for (i=0;i<(num_files-1);i++)
+		printf("%s,",filenames[i]);
+	printf("%s]\n",filenames[num_files-1]);
+}
+
+void del_dups(char *computer, char **filenames, int num_files, int size) {
+
+
+
+// void deal_with_dups(char *computer, char **filenames, int num_files, int size)
+void (*deal_with_dups)(char *, char **, int, int) = &print_dups;
+
+int dup_checker(void *nothing, int num_cols, char **column_vals, char **column_names) {
+	int res,i,num_dups;
+	int size = atoi(column_vals[0]);
+	int rowid;
+	unsigned int hash,new_hash;
+	char **filenames;
+	int file_i;
 	
-	sqlite3_bind_text(select_file_prep,1,column_vals[0],strlen(column_vals[0]),SQLITE_STATIC);
-	res = sqlite3_step();
+	const char *filename,*computer;
+	
+	printf("checking size %d\n",size);
+	sqlite3_bind_text(select_file_hash_prep,1,column_vals[0],(int)strlen(column_vals[0]),SQLITE_STATIC);
+	res = sqlite3_step(select_file_hash_prep);
 	while(res!=SQLITE_DONE) {
+		if(res==SQLITE_ROW) {
+			rowid = sqlite3_column_int(select_file_hash_prep,0);
+			filename = (const char *)sqlite3_column_text(select_file_hash_prep,1);
 		
+			hash = fast_hash_file(filename,size);
+			if(verbose)
+				printf("%s: %x\n",filename,hash);
+		
+			sqlite3_bind_int(update_file_hash_prep,1,hash);
+			sqlite3_bind_int(update_file_hash_prep,2,rowid);
+			sqlite3_step(update_file_hash_prep);
+			sqlite3_reset(update_file_hash_prep);
+		}		
+		res = sqlite3_step(select_file_hash_prep);
 	}
 	
+    sqlite3_bind_text(select_file_dups_count_prep,1,column_vals[0],(int)strlen(column_vals[0]),SQLITE_STATIC);
+	sqlite3_step(select_file_dups_count_prep);
+    num_dups = sqlite3_column_int(select_file_dups_count_prep,0);
+    sqlite3_reset(select_file_dups_count_prep);
+    
+    filenames = malloc(sizeof(char *) * num_dups);
+    memset(filenames,0,sizeof(char *) * num_dups);
+
+	sqlite3_bind_text(select_file_dups_prep,1,column_vals[0],(int)strlen(column_vals[0]),SQLITE_STATIC);
+	res = sqlite3_step(select_file_dups_prep);
+	hash = 0;
+	file_i = 0;
+	while(res!=SQLITE_DONE) {
+		if(res==SQLITE_ROW) {
+			computer = (const char *)sqlite3_column_text(select_file_dups_prep,0);
+			filename = (const char *)sqlite3_column_text(select_file_dups_prep,1);
+			new_hash = sqlite3_column_int(select_file_dups_prep,2);
+			if(hash!=new_hash) {
+                if(file_i>0)
+                    deal_with_dups((char *)computer, filenames, file_i, size);
+			
+				for(i=0;i<file_i;i++) {
+					if(filenames[i]!=0) {
+						free(filenames[i]);
+						filenames[i] = 0;
+					}
+				}
+				file_i = 0;
+				hash = new_hash;
+			}
+			filenames[file_i] = malloc(strlen(filename)+1);
+			strcpy(filenames[file_i++],filename);
+		}
+        res = sqlite3_step(select_file_dups_prep);
+	}
+    
+    if(file_i>0)
+        deal_with_dups((char *)computer, filenames, file_i, size);
+
+    for(i=0;i<file_i;i++) {
+        if(filenames[i]!=0) {
+            free(filenames[i]);
+            filenames[i] = 0;
+        }
+    }
 	
-	// Foreach size:
-	//		Find all files with size
-	//		Foreach file:
-	//			If no hash, hash now
-	//		Any files with equal size,hash -> deal with
-//				select_file_dups_stmt "SELECT computer,filename,size,hash FROM files WHERE size=? AND hash IS NOT NULL ORDER BY size,hash";
+	sqlite3_reset(select_file_hash_prep);
+    sqlite3_reset(select_file_dups_prep);
+	free(filenames);
 	
-	
-	//char *select_file_stmt = "SELECT computer,filename,size,hash FROM files WHERE size=?";
-	
+	return 0;	
 }
 
 void find_duplicates() {
 	// Create tracking table and populate with duplicates
 	sqlite3_exec(db,create_track_stmt,0,0,0);
-	sqlite3_prepare_v2(db,select_hosts_stmt,strlen(select_hosts_stmt),&select_hosts_prep,0);
-	sqlite3_bind_text(select_hosts_prep,1,hostname,strlen(hostname),SQLITE_STATIC);
+	sqlite3_prepare_v2(db,select_hosts_stmt,(int)strlen(select_hosts_stmt),&select_hosts_prep,0);
+	sqlite3_bind_text(select_hosts_prep,1,hostname,(int)strlen(hostname),SQLITE_STATIC);
 	if(sqlite3_step(select_hosts_prep)==SQLITE_ROW) {
 		if(sqlite3_column_int(select_hosts_prep,0) > 0) {
 			puts("ERROR: Cannot search for duplicates. There are unhashed files from other\n"
@@ -188,13 +280,17 @@ void find_duplicates() {
 	}
 	sqlite3_finalize(select_hosts_prep);
 	
-	sqlite3_prepare_v2(db,select_file_hash_stmt,strlen(select_file_hash_stmt),&select_file_hash_prep,0);
-	sqlite3_prepare_v2(db,select_file_dups_stmt,strlen(select_file_dups_stmt),&select_file_dups_prep,0);
+	sqlite3_prepare_v2(db,select_file_hash_stmt,(int)strlen(select_file_hash_stmt),&select_file_hash_prep,0);
+	sqlite3_prepare_v2(db,select_file_dups_stmt,(int)strlen(select_file_dups_stmt),&select_file_dups_prep,0);
+	sqlite3_prepare_v2(db,select_file_dups_count_stmt,(int)strlen(select_file_dups_count_stmt),&select_file_dups_count_prep,0);
+	sqlite3_prepare_v2(db,update_file_hash_stmt,(int)strlen(update_file_hash_stmt),&update_file_hash_prep,0);
 	
 	sqlite3_exec(db,select_track_stmt,&dup_checker,0,0);
 	
 	sqlite3_finalize(select_file_hash_prep);	
 	sqlite3_finalize(select_file_dups_prep);
+	sqlite3_finalize(select_file_dups_count_prep);
+	sqlite3_finalize(update_file_hash_prep);
 }
 
 void find_exact() {
@@ -252,7 +348,7 @@ int main(int argc, char **argv) {
 				break;
 			case 'x':
 				exact_flag = 1;
-			case 'z'
+			case 'z':
 				hash_flag = 1;
 				break;
 			case 'p':
@@ -310,10 +406,10 @@ int main(int argc, char **argv) {
 	}
 
 	sqlite3_exec(db,create_stmt,0,0,0);
-	sqlite3_prepare_v2(db,insert_size_stmt,strlen(insert_size_stmt),&insert_size_prep,0);
-	sqlite3_prepare_v2(db,insert_full_stmt,strlen(insert_full_stmt),&insert_full_prep,0);
-	sqlite3_prepare_v2(db,update_hash_stmt,strlen(update_hash_stmt),&update_hash_prep,0);
-	sqlite3_prepare_v2(db,select_stmt,strlen(select_stmt),&select_prep,0);
+	sqlite3_prepare_v2(db,insert_size_stmt,(int)strlen(insert_size_stmt),&insert_size_prep,0);
+	sqlite3_prepare_v2(db,insert_full_stmt,(int)strlen(insert_full_stmt),&insert_full_prep,0);
+	sqlite3_prepare_v2(db,update_hash_stmt,(int)strlen(update_hash_stmt),&update_hash_prep,0);
+	sqlite3_prepare_v2(db,select_stmt,(int)strlen(select_stmt),&select_prep,0);
 	
 	for (i=0;i<num_scan_dirs;i++) {
 		if(verbose)
@@ -323,13 +419,15 @@ int main(int argc, char **argv) {
 	
 	if(parse_flag) {
 		if(dups_flag)
+			puts("----\nstarting duplicate check");
 			find_duplicates();
 		if(exact_flag)
+			puts("----\nstarting exact copy check");
 			find_exact();
 	}
 	
 	if(verbose)
-		puts("All done... have a nice day\n");
+		puts("\nAll done... have a nice day\n");
 	
 	sqlite3_finalize(insert_size_prep);
 	sqlite3_finalize(insert_full_prep);	
