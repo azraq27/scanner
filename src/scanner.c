@@ -165,7 +165,7 @@ int file_callback(const char *filename, const struct stat *stat_struct, int flag
 	return 0;
 }
 
-void print_dups(char *computer, char **filenames, int num_files, int size) {
+void print_dups(char **computer, char **filenames, int num_files, int size) {
 	int i;
 	
 	printf("[");
@@ -174,12 +174,25 @@ void print_dups(char *computer, char **filenames, int num_files, int size) {
 	printf("%s]\n",filenames[num_files-1]);
 }
 
-void del_dups(char *computer, char **filenames, int num_files, int size) {
-
+void del_dups(char **computer, char **filenames, int num_files, int size) {
+    int i;
+    
+    printf("Deleting duplicates of %s\n",filenames[0]);
+    for(i=1;i<num_files;i++) {
+        if(strcmp(computer[i],hostname)==0) {
+            if(verbose)
+                printf("\tdeleting %s\n",filenames[i]);
+            unlink(filenames[i]);
+        }
+        else {
+            printf("Error: cannot deal with duplicate found on %s: %s\n", computer[i],filenames[i]);
+        }
+    }
+}
 
 
 // void deal_with_dups(char *computer, char **filenames, int num_files, int size)
-void (*deal_with_dups)(char *, char **, int, int) = &print_dups;
+void (*deal_with_dups)(char **, char **, int, int) = &del_dups;
 
 int dup_checker(void *nothing, int num_cols, char **column_vals, char **column_names) {
 	int res,i,num_dups;
@@ -187,6 +200,7 @@ int dup_checker(void *nothing, int num_cols, char **column_vals, char **column_n
 	int rowid;
 	unsigned int hash,new_hash;
 	char **filenames;
+    char **computers;
 	int file_i;
 	
 	const char *filename,*computer;
@@ -218,6 +232,9 @@ int dup_checker(void *nothing, int num_cols, char **column_vals, char **column_n
     
     filenames = malloc(sizeof(char *) * num_dups);
     memset(filenames,0,sizeof(char *) * num_dups);
+    
+    computers = malloc(sizeof(char *) * num_dups);
+    memset(computers,0,sizeof(char *) * num_dups);
 
 	sqlite3_bind_text(select_file_dups_prep,1,column_vals[0],(int)strlen(column_vals[0]),SQLITE_STATIC);
 	res = sqlite3_step(select_file_dups_prep);
@@ -230,30 +247,40 @@ int dup_checker(void *nothing, int num_cols, char **column_vals, char **column_n
 			new_hash = sqlite3_column_int(select_file_dups_prep,2);
 			if(hash!=new_hash) {
                 if(file_i>0)
-                    deal_with_dups((char *)computer, filenames, file_i, size);
+                    deal_with_dups(computers, filenames, file_i, size);
 			
 				for(i=0;i<file_i;i++) {
 					if(filenames[i]!=0) {
 						free(filenames[i]);
 						filenames[i] = 0;
 					}
+					if(computers[i]!=0) {
+						free(computers[i]);
+						computers[i] = 0;
+					}
 				}
 				file_i = 0;
 				hash = new_hash;
 			}
 			filenames[file_i] = malloc(strlen(filename)+1);
-			strcpy(filenames[file_i++],filename);
+			computers[file_i] = malloc(strlen(computer)+1);
+			strcpy(filenames[file_i],filename);
+			strcpy(computers[file_i++],computer);
 		}
         res = sqlite3_step(select_file_dups_prep);
 	}
     
     if(file_i>0)
-        deal_with_dups((char *)computer, filenames, file_i, size);
+        deal_with_dups(computers, filenames, file_i, size);
 
     for(i=0;i<file_i;i++) {
         if(filenames[i]!=0) {
             free(filenames[i]);
             filenames[i] = 0;
+        }
+        if(computers[i]!=0) {
+            free(computers[i]);
+            computers[i] = 0;
         }
     }
 	
