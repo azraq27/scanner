@@ -127,7 +127,7 @@ int file_callback(const char *filename, const struct stat *stat_struct, int flag
 	
 	char *fullfilename = realpath(filename,0);
 
-	if(stat_struct->st_size < min_size) {
+	if(stat_struct->st_size < min_size || flags!=FTW_F) {
 //		if(verbose)
 //			printf("%s: (skipping, under min_size)\n",fullfilename);
 		return 0;
@@ -165,13 +165,12 @@ int file_callback(const char *filename, const struct stat *stat_struct, int flag
 	return 0;
 }
 
-void print_dups(char **computer, char **filenames, int num_files, int size) {
+void print_dups(char **computers, char **filenames, int num_files, int size) {
 	int i;
 	
-	printf("[");
-	for (i=0;i<(num_files-1);i++)
-		printf("%s,",filenames[i]);
-	printf("%s]\n",filenames[num_files-1]);
+	printf("Found duplicates of %s:%s\n", computers[0],filenames[0]);
+	for (i=1;i<num_files;i++)
+		printf("\t%s:%s\n",computers[i],filenames[i]);
 }
 
 void del_dups(char **computer, char **filenames, int num_files, int size) {
@@ -192,7 +191,7 @@ void del_dups(char **computer, char **filenames, int num_files, int size) {
 
 
 // void deal_with_dups(char *computer, char **filenames, int num_files, int size)
-void (*deal_with_dups)(char **, char **, int, int) = &del_dups;
+void (*deal_with_dups)(char **, char **, int, int) = &print_dups;
 
 int dup_checker(void *nothing, int num_cols, char **column_vals, char **column_names) {
 	int res,i,num_dups;
@@ -246,7 +245,7 @@ int dup_checker(void *nothing, int num_cols, char **column_vals, char **column_n
 			filename = (const char *)sqlite3_column_text(select_file_dups_prep,1);
 			new_hash = sqlite3_column_int(select_file_dups_prep,2);
 			if(hash!=new_hash) {
-                if(file_i>0)
+                if(file_i>1)
                     deal_with_dups(computers, filenames, file_i, size);
 			
 				for(i=0;i<file_i;i++) {
@@ -270,7 +269,7 @@ int dup_checker(void *nothing, int num_cols, char **column_vals, char **column_n
         res = sqlite3_step(select_file_dups_prep);
 	}
     
-    if(file_i>0)
+    if(file_i>1)
         deal_with_dups(computers, filenames, file_i, size);
 
     for(i=0;i<file_i;i++) {
@@ -341,6 +340,8 @@ void usage() {
 	"		  This is necessary if you will be parsing across multiple computers\n"
 	"		  since the program has no way of hashing a file on another computer\n"
 	"		  when it finally parses the data\n"
+    "\n"
+    "   -u: unlink duplicates (default is just to print them)\n"
 	"\n"
 	"	-p: force data parsing: check duplicates or exact matches after the scan\n"
 	"\n"	
@@ -368,7 +369,7 @@ int main(int argc, char **argv) {
 		return 0;
 	}
 	
-	while((c=getopt(argc,argv,"dxpm:o:hv")) != -1) {
+	while((c=getopt(argc,argv,"udxpm:o:hv")) != -1) {
 		switch(c) {
 			case 'd':
 				dups_flag = 1;
@@ -387,6 +388,9 @@ int main(int argc, char **argv) {
 			case 'o':
 				strncpy(output_filename,optarg,63); output_filename[63]='\0';
 				break;
+            case 'u':
+                deal_with_dups = del_dups;
+                break;
 			case 'v':
 				verbose = 1;
 				break;
