@@ -93,7 +93,7 @@ sqlite3_stmt *select_equal_sized_prep;
 
 int verbose = 0;
 
-unsigned int fast_hash_file(const char *filename, int size) {
+unsigned int fast_hash_file(const char *filename, unsigned int size) {
 	unsigned int hash=0;
 	int size_read;
 	unsigned char *buffer;
@@ -141,7 +141,7 @@ int file_callback(const char *filename, const struct stat *stat_struct, int flag
 		}
 		// Only hash every file if we're looking for exact duplicates
 		if(hash_flag) {
-			hash = fast_hash_file(filename,(int)stat_struct->st_size);
+			hash = fast_hash_file(filename,(unsigned int)stat_struct->st_size);
 			if(verbose)
 				printf("\b\b\b%x\n",hash);
 			insert_prep_proxy = insert_full_prep;
@@ -153,7 +153,7 @@ int file_callback(const char *filename, const struct stat *stat_struct, int flag
 		}
 		sqlite3_bind_text(insert_prep_proxy,1,hostname,(int)strlen(hostname),SQLITE_STATIC);
 		sqlite3_bind_text(insert_prep_proxy,2,fullfilename,(int)strlen(fullfilename),SQLITE_TRANSIENT);
-		sqlite3_bind_int(insert_prep_proxy,3,(int)stat_struct->st_size);
+		sqlite3_bind_int(insert_prep_proxy,3,(unsigned int)stat_struct->st_size);
 		sqlite3_step(insert_prep_proxy);
 		sqlite3_reset(insert_prep_proxy);
 	}
@@ -165,7 +165,7 @@ int file_callback(const char *filename, const struct stat *stat_struct, int flag
 	return 0;
 }
 
-void print_dups(char **computers, char **filenames, int num_files, int size) {
+void print_dups(char **computers, char **filenames, int num_files, unsigned int size) {
 	int i;
 	
 	printf("Found duplicates of %s:%s\n", computers[0],filenames[0]);
@@ -173,7 +173,7 @@ void print_dups(char **computers, char **filenames, int num_files, int size) {
 		printf("\t%s:%s\n",computers[i],filenames[i]);
 }
 
-void del_dups(char **computer, char **filenames, int num_files, int size) {
+void del_dups(char **computer, char **filenames, int num_files, unsigned int size) {
     int i;
     
     printf("Deleting duplicates of %s\n",filenames[0]);
@@ -191,7 +191,7 @@ void del_dups(char **computer, char **filenames, int num_files, int size) {
 
 
 // void deal_with_dups(char *computer, char **filenames, int num_files, int size)
-void (*deal_with_dups)(char **, char **, int, int) = &print_dups;
+void (*deal_with_dups)(char **, char **, int, unsigned int) = &print_dups;
 
 int dup_checker(void *nothing, int num_cols, char **column_vals, char **column_names) {
 	int res,i,num_dups;
