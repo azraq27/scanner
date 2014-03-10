@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <sys/stat.h>
 #include <ftw.h>
+#include <fnmatch.h>
 #include <unistd.h>
 #include <string.h>
 #include <sqlite3.h>
@@ -26,9 +27,13 @@
 
 
 #define max_scan_dirs 		10
+#define max_exclude_patterns	32
 #define max_filename_size	64
 
 int min_size = default_min_size;
+
+char ignore_patterns[max_exclude_patterns][max_filename_size];
+int num_ignore_patterns = 0;
 
 int dups_flag=0,exact_flag=0,hash_flag=0;
 
@@ -127,6 +132,14 @@ int file_callback(const char *filename, const struct stat *stat_struct, int flag
 	
 	char *fullfilename = realpath(filename,0);
 
+	for(int i=0;i<num_ignore_patterns;i++) {
+		if(fnmatch(ignore_patterns[i],fullfilename,FNM_LEADING_DIR)==0) {
+			if(verbose)
+				printf("%s: skipping, matches pattern \"%s\"\n",fullfilename,ignore_patterns[i]);
+			return 0;
+		}
+	}
+
 	if(stat_struct->st_size < min_size || flags!=FTW_F) {
 //		if(verbose)
 //			printf("%s: (skipping, under min_size)\n",fullfilename);
@@ -149,7 +162,8 @@ int file_callback(const char *filename, const struct stat *stat_struct, int flag
 		}
 		else {
 			insert_prep_proxy = insert_size_prep;
-			printf("\n");
+			if(verbose)
+				printf("\n");
 		}
 		sqlite3_bind_text(insert_prep_proxy,1,hostname,(int)strlen(hostname),SQLITE_STATIC);
 		sqlite3_bind_text(insert_prep_proxy,2,fullfilename,(int)strlen(fullfilename),SQLITE_TRANSIENT);
@@ -326,7 +340,7 @@ void find_exact() {
 void usage() {
 	puts("Scan a bunch of files, hash them, and then figure out if there are any duplicates.\n"
 	"\n"
-	"Usage: scanner [-x|-d] [-z] [-p] [-m size] [-o output_file.db] [directory]\n"
+	"Usage: scanner [-x|-d] [-z] [-p] [-m size] [-i filename] [-o output_file.db] [directory]\n"
 	"	If directory is given, will default to scanning with no duplicate checking\n"
 	"	(just saves the data). If -p is given, will parse the data to find duplicates.\n"
 	"\n"	
@@ -346,6 +360,8 @@ void usage() {
 	"	-p: force data parsing: check duplicates or exact matches after the scan\n"
 	"\n"	
 	"	-m size: minimum size file to care about (default 10k)\n"
+	"\n"
+	"   -i filename: ignore all files matching pattern \"filename\""
 	"\n"	
 	"	-o output_file.db: sqlite3 database file to store output in \n"
 	"		 (will append data if present, default 'output.db')\n"
@@ -369,7 +385,7 @@ int main(int argc, char **argv) {
 		return 0;
 	}
 	
-	while((c=getopt(argc,argv,"udxpm:o:hv")) != -1) {
+	while((c=getopt(argc,argv,"udxpm:i:o:hv")) != -1) {
 		switch(c) {
 			case 'd':
 				dups_flag = 1;
@@ -385,6 +401,9 @@ int main(int argc, char **argv) {
 			case 'm':
 				min_size = atoi(optarg);
 				break;
+			case 'i':
+				strncpy(ignore_patterns[num_ignore_patterns],optarg,63); ignore_patterns[num_ignore_patterns++][63]='\0';
+				break;
 			case 'o':
 				strncpy(output_filename,optarg,63); output_filename[63]='\0';
 				break;
@@ -398,11 +417,8 @@ int main(int argc, char **argv) {
 				usage();
 				return 0;
 			case '?':
-				if(optopt=='m') {
-					puts("Error: -m requires an argument");
-				}
-				else if(optopt=='o') {
-					puts("Error: -o requires an argument");
+				if(optopt=='m' || optopt=='o' || optopt=='i') {
+					printf("Error: -%c requires an argument\n",optopt);
 				}
 				else {
 					printf("Unknown option -%cn\n",optopt);
